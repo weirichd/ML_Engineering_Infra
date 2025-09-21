@@ -22,7 +22,7 @@ jobs:
         run: |
           set -euo pipefail
           aws cloudformation deploy \
-            --template-file cloudformation/mlflow-sqlite.yml \
+            --template-file cloudformation/mlflow-sqlite.yaml \
             --stack-name mlflow-sqlite \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \

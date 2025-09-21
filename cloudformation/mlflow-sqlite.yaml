@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Minimal MLflow on EC2 with SQLite backend and S3 artifact store (HTTP only)
+
+Parameters:
+  Env:
+    Type: String
+    Default: prod
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 KeyPair name for SSH
+  SSHCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to SSH to EC2 (use your.ip.addr/32)
+  DockerImage:
+    Type: String
+    Default: ghcr.io/OWNER/mlflow-server:latest
+    Description: MLflow server image (we’ll swap OWNER later)
+
+Mappings: {}
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "mlflow-artifacts-${Env}-${AWS::AccountId}"
+      VersioningConfiguration: { Status: Enabled }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnforceTLS
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "${ArtifactBucket.Arn}"
+              - !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  EC2SG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: MLflow EC2 SG
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22,  ToPort: 22,  CidrIp: !Ref SSHCidr }
+        - { IpProtocol: tcp, FromPort: 80,  ToPort: 80,  CidrIp: 0.0.0.0/0 }
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: MlflowS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "${ArtifactBucket.Arn}"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "${ArtifactBucket.Arn}/*"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [ !Ref InstanceRole ]
+
+  # Latest Ubuntu 22.04 AMD64 via SSM public parameter
+  UbuntuAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref UbuntuAmi
+      InstanceType: t3.small
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [ !Ref EC2SG ]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y docker.io docker-compose-plugin nginx sqlite3
+          systemctl enable --now docker
+
+          # simple nginx reverse proxy to mlflow :5000 (HTTP only for now)
+          cat >/etc/nginx/sites-available/default <<'NG'
+          server {
+            listen 80 default_server;
+            listen [::]:80 default_server;
+            server_name _;
+            location / {
+              proxy_pass http://127.0.0.1:5000;
+              proxy_set_header Host $host;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto http;
+              proxy_read_timeout 600;
+            }
+          }
+          NG
+          systemctl restart nginx
+
+          # SQLite DB location + initialize WAL (reduces lock contention)
+          mkdir -p /var/lib/mlflow/db
+          sqlite3 /var/lib/mlflow/db/mlflow.db "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
+
+          # systemd unit to run MLflow container (single worker)
+          cat >/etc/systemd/system/mlflow.service <<'UNIT'
+          [Unit]
+          Description=MLflow Server (Docker, SQLite)
+          After=docker.service
+          Requires=docker.service
+
+          [Service]
+          Restart=always
+          ExecStart=/usr/bin/docker run --rm --name mlflow \
+            -p 5000:5000 \
+            -v /var/lib/mlflow/db:/mlflow_db \
+            -e BACKEND_STORE_URI=sqlite:////mlflow_db/mlflow.db?check_same_thread=false \
+            -e DEFAULT_ARTIFACT_ROOT=s3://${ArtifactBucket}/mlruns \
+            ${DockerImage}
+          ExecStop=/usr/bin/docker stop mlflow
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          systemctl daemon-reload
+          systemctl enable --now mlflow
+
+      Tags:
+        - { Key: Name, Value: !Sub "mlflow-ec2-${Env}" }
+
+Outputs:
+  ArtifactBucketName: { Value: !Ref ArtifactBucket }
+  EC2PublicIP:        { Value: !GetAtt EC2Instance.PublicIp }
+  MLflowURL:          { Value: !Sub "http://${EC2Instance.PublicIp}" }
+

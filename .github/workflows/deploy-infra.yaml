@@ -20,18 +20,43 @@ jobs:
 
       - name: Deploy CloudFormation stack
         run: |
-          set -euo pipefail
-          aws cloudformation deploy \
+            set -euo pipefail
+
+            # Discover default VPC and a default subnet in us-east-1
+            VPC_ID=$(aws ec2 describe-vpcs \
+            --filters Name=isDefault,Values=true \
+            --query 'Vpcs[0].VpcId' --output text)
+
+            SUBNET_ID=$(aws ec2 describe-subnets \
+            --filters Name=vpc-id,Values=${VPC_ID} Name=default-for-az,Values=true \
+            --query 'Subnets[0].SubnetId' --output text)
+
+            # Fetch Ubuntu 22.04 (Jammy) AMI from SSM public params. Try numeric path, then codename.
+            AMI_PARAM='/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp3/ami-id'
+            UBUNTU_AMI=$(aws ssm get-parameters --names "${AMI_PARAM}" \
+            --query 'Parameters[0].Value' --output text || echo '')
+            if [ -z "${UBUNTU_AMI}" ] || [ "${UBUNTU_AMI}" = "None" ]; then
+            AMI_PARAM='/aws/service/canonical/ubuntu/server/jammy/stable/current/amd64/hvm/ebs-gp3/ami-id'
+            UBUNTU_AMI=$(aws ssm get-parameters --names "${AMI_PARAM}" \
+                --query 'Parameters[0].Value' --output text)
+            fi
+
+            echo "VPC_ID=${VPC_ID}"
+            echo "SUBNET_ID=${SUBNET_ID}"
+            echo "UBUNTU_AMI=${UBUNTU_AMI}"
+
+            aws cloudformation deploy \
             --template-file cloudformation/mlflow-sqlite.yaml \
             --stack-name mlflow-sqlite \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
-              Env=prod \
-              KeyPairName='${{ secrets.EC2_KEYPAIR_NAME }}' \
-              SSHCidr='${{ secrets.SSH_CIDR }}' \
-              DockerImage='${{ vars.DOCKER_IMAGE }}' \
-              VpcId='${{ vars.VPC_ID }}' \
-              SubnetId='${{ vars.SUBNET_ID }}'
+                Env=prod \
+                KeyPairName='${{ secrets.EC2_KEYPAIR_NAME }}' \
+                SSHCidr='${{ secrets.SSH_CIDR }}' \
+                DockerImage='${{ vars.DOCKER_IMAGE }}' \
+                VpcId="${VPC_ID}" \
+                SubnetId="${SUBNET_ID}" \
+                UbuntuAmiId="${UBUNTU_AMI}"
 
       - name: Show stack outputs
         run: |

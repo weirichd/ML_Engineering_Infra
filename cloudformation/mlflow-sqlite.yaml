@@ -22,10 +22,9 @@ Parameters:
   SubnetId:
     Type: AWS::EC2::Subnet::Id
     Description: Subnet in that VPC (use one of the default subnets)
-  UbuntuAmi:
-    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
-    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp3/ami-id
-
+  UbuntuAmiId:
+    Type: String
+    Description: "AMI ID for Ubuntu 22.04"
 
 Mappings: {}
 
@@ -104,7 +103,7 @@ Resources:
   EC2Instance:
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: !Ref UbuntuAmi
+      ImageId: !Ref UbuntuAmiId
       InstanceType: t3.small
       SubnetId: !Ref SubnetId
       KeyName: !Ref KeyPairName

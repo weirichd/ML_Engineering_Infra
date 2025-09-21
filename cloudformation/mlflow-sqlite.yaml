@@ -16,6 +16,16 @@ Parameters:
     Type: String
     Default: ghcr.io/OWNER/mlflow-server:latest
     Description: MLflow server image (we’ll swap OWNER later)
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the EC2 instance and security group (use your default VPC)
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet in that VPC (use one of the default subnets)
+  UbuntuAmi:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+
 
 Mappings: {}
 
@@ -55,6 +65,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: MLflow EC2 SG
+      VpcId: !Ref VpcId
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 22,  ToPort: 22,  CidrIp: !Ref SSHCidr }
         - { IpProtocol: tcp, FromPort: 80,  ToPort: 80,  CidrIp: 0.0.0.0/0 }
@@ -90,16 +101,12 @@ Resources:
     Properties:
       Roles: [ !Ref InstanceRole ]
 
-  # Latest Ubuntu 22.04 AMD64 via SSM public parameter
-  UbuntuAmi:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp3/ami-id
-
   EC2Instance:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref UbuntuAmi
       InstanceType: t3.small
+      SubnetId: !Ref SubnetId
       KeyName: !Ref KeyPairName
       IamInstanceProfile: !Ref InstanceProfile
       SecurityGroupIds: [ !Ref EC2SG ]

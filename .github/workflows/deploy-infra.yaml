@@ -22,14 +22,16 @@ jobs:
         run: |
           set -euo pipefail
           aws cloudformation deploy \
-            --template-file cloudformation/mlflow-sqlite.yaml \
+            --template-file cloudformation/mlflow-sqlite.yaml \  # ensure extension matches your file
             --stack-name mlflow-sqlite \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
               Env=prod \
               KeyPairName='${{ secrets.EC2_KEYPAIR_NAME }}' \
               SSHCidr='${{ secrets.SSH_CIDR }}' \
-              DockerImage='${{ vars.DOCKER_IMAGE }}'
+              DockerImage='${{ vars.DOCKER_IMAGE }}' \
+              VpcId='${{ vars.VPC_ID }}' \
+              SubnetId='${{ vars.SUBNET_ID }}'
 
       - name: Show stack outputs
         run: |

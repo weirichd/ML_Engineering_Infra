@@ -32,7 +32,7 @@ Resources:
   ArtifactBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "mlflow-artifacts-${Env}-${AWS::AccountId}"
+      BucketName: !Sub "mlflow-artifacts-${Env}-${AWS::AccountId}-${AWS::Region}"
       VersioningConfiguration: { Status: Enabled }
       BucketEncryption:
         ServerSideEncryptionConfiguration:

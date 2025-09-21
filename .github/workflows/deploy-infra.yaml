@@ -16,7 +16,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-region: us-east-2
 
       - name: Clear failed stack if present
         run: |
@@ -37,7 +37,7 @@ jobs:
         run: |
             set -euo pipefail
 
-            # Discover default VPC and a default subnet in us-east-1
+            # Discover default VPC and a default subnet in us-east-2
             VPC_ID=$(aws ec2 describe-vpcs \
             --filters Name=isDefault,Values=true \
             --query 'Vpcs[0].VpcId' --output text)

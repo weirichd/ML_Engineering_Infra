@@ -31,6 +31,23 @@ jobs:
           echo "$PAYLOAD" | jq .
           echo "SUB_CLAIM=$(echo "$PAYLOAD" | jq -r .sub)" >> $GITHUB_OUTPUT
 
+      - name: Try STS AssumeRoleWithWebIdentity (manual)
+        env:
+          ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          # Get a fresh OIDC token for audience sts.amazonaws.com
+          TOK=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r .value)
+
+          echo "Calling aws sts assume-role-with-web-identity..."
+          aws sts assume-role-with-web-identity \
+            --role-arn "$ROLE_ARN" \
+            --role-session-name "oidc-test" \
+            --web-identity-token "$TOK" \
+            --duration-seconds 900 \
+            --output json
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:

@@ -18,6 +18,21 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
 
+      - name: Clear failed stack if present
+        run: |
+            set -euo pipefail
+            STACK="mlflow-sqlite"
+            STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK" \
+            --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "NOTFOUND")
+            echo "Current stack status: $STATUS"
+            if [ "$STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STATUS" = "CREATE_FAILED" ] || [ "$STATUS" = "ROLLBACK_FAILED" ]; then
+            aws cloudformation delete-stack --stack-name "$STACK"
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK"
+            echo "Deleted $STACK. Proceeding with fresh deploy."
+            fi
+
+
       - name: Deploy CloudFormation stack
         run: |
             set -euo pipefail

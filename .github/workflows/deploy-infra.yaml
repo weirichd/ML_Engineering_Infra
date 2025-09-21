@@ -1,0 +1,38 @@
+name: Deploy Infra (MLflow SQLite)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Deploy CloudFormation stack
+        run: |
+          set -euo pipefail
+          aws cloudformation deploy \
+            --template-file cloudformation/mlflow-sqlite.yml \
+            --stack-name mlflow-sqlite \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              Env=prod \
+              KeyPairName='${{ secrets.EC2_KEYPAIR_NAME }}' \
+              SSHCidr='${{ secrets.SSH_CIDR }}' \
+              DockerImage='${{ vars.DOCKER_IMAGE }}'
+
+      - name: Show stack outputs
+        run: |
+          aws cloudformation describe-stacks --stack-name mlflow-sqlite \
+            --query "Stacks[0].Outputs" --output table
+

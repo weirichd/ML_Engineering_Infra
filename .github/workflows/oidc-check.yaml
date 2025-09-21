@@ -1,5 +1,4 @@
 name: OIDC Check
-
 on:
   workflow_dispatch:
 
@@ -11,6 +10,26 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+
+      - name: Show repo/ref
+        run: |
+          echo "repository=${{ github.repository }}"
+          echo "ref=${{ github.ref }}"
+          echo "sha=${{ github.sha }}"
+          echo "actor=${{ github.actor }}"
+
+      - name: Fetch and print OIDC sub
+        id: oidc
+        run: |
+          set -euo pipefail
+          # Request an OIDC token for audience sts.amazonaws.com
+          TOK=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r .value)
+          # Decode JWT payload to see claims
+          PAYLOAD=$(echo "$TOK" | cut -d '.' -f2 | base64 -d 2>/dev/null || true)
+          echo "OIDC payload:"
+          echo "$PAYLOAD" | jq .
+          echo "SUB_CLAIM=$(echo "$PAYLOAD" | jq -r .sub)" >> $GITHUB_OUTPUT
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4

@@ -115,7 +115,7 @@ Resources:
           set -eux
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -y docker.io docker-compose-plugin nginx sqlite3
+          apt-get install -y docker.io nginx sqlite3
           systemctl enable --now docker
 
           # simple nginx reverse proxy to mlflow :5000 (HTTP only for now)
@@ -148,6 +148,7 @@ Resources:
 
           [Service]
           Restart=always
+          ExecStartPre=/usr/bin/docker pull ${DockerImage}
           ExecStart=/usr/bin/docker run --rm --name mlflow \
             -p 5000:5000 \
             -v /var/lib/mlflow/db:/mlflow_db \

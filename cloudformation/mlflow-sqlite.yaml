@@ -110,81 +110,81 @@ Resources:
       IamInstanceProfile: !Ref InstanceProfile
       SecurityGroupIds: [ !Ref EC2SG ]
       UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -eux
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update
-          apt-get install -y docker.io nginx sqlite3
-          systemctl enable --now docker
+        Fn::Base64:
+          !Sub
+            - |
+              #!/bin/bash
+              set -eux
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y docker.io nginx sqlite3
+              systemctl enable --now docker
 
-          # simple nginx reverse proxy to mlflow :5000 (HTTP only for now)
-          cat >/etc/nginx/sites-available/default <<'NG'
-          server {
-            listen 80 default_server;
-            listen [::]:80 default_server;
-            server_name _;
-            location / {
-              proxy_pass http://127.0.0.1:5000;
-              proxy_set_header Host $host;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto http;
-              proxy_read_timeout 600;
-            }
-          }
-          NG
-          systemctl restart nginx
+              # Nginx proxy
+              cat >/etc/nginx/sites-available/default <<'NG'
+              server {
+                listen 80 default_server;
+                listen [::]:80 default_server;
+                server_name _;
+                location / {
+                  proxy_pass http://127.0.0.1:5000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto http;
+                  proxy_read_timeout 600;
+                }
+              }
+              NG
+              systemctl restart nginx
 
-          # SQLite DB location + initialize WAL (reduces lock contention)
-          mkdir -p /var/lib/mlflow/db
-          sqlite3 /var/lib/mlflow/db/mlflow.db "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
-          chown -R 1000:1000 /var/lib/mlflow/db
+              # SQLite + WAL + ownership for container UID 1000
+              mkdir -p /var/lib/mlflow/db
+              sqlite3 /var/lib/mlflow/db/mlflow.db "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
+              chown -R 1000:1000 /var/lib/mlflow/db
 
-          # ---- Auth config & secret (persist across container restarts)
-          mkdir -p /var/lib/mlflow/auth
-          cat >/var/lib/mlflow/auth/basic_auth.ini <<'INI'
-          [mlflow]
-          # store users/permissions here on the host
-          database_uri = sqlite:////mlflow_auth/basic_auth.db
-          # default_permission = READ
-          INI
+              # ---- Auth config & secret (persist on host)
+              mkdir -p /var/lib/mlflow/auth
+              cat >/var/lib/mlflow/auth/basic_auth.ini <<'INI'
+              [mlflow]
+              database_uri = sqlite:////mlflow_auth/basic_auth.db
+              INI
+              install -d -m 0755 /etc/mlflow
+              SECRET=$(head -c 32 /dev/urandom | base64)
+              cat >/etc/mlflow/env <<EOF
+              MLFLOW_FLASK_SERVER_SECRET_KEY=$SECRET
+              MLFLOW_AUTH_CONFIG_PATH=/mlflow_auth/basic_auth.ini
+              EOF
+              chown -R 1000:1000 /var/lib/mlflow/auth
 
-          # server secret for CSRF (kept on host, injected into container)
-          install -d -m 0755 /etc/mlflow
-          SECRET=$(head -c 32 /dev/urandom | base64)
-          cat >/etc/mlflow/env <<EOF
-          MLFLOW_FLASK_SERVER_SECRET_KEY=${SECRET}
-          MLFLOW_AUTH_CONFIG_PATH=/mlflow_auth/basic_auth.ini
-          EOF
-          #
-          # systemd unit to run MLflow container (single worker)
-          cat >/etc/systemd/system/mlflow.service <<'UNIT'
-          [Unit]
-          Description=MLflow Server (Docker, SQLite)
-          After=docker.service
-          Requires=docker.service
+              # systemd unit
+              cat >/etc/systemd/system/mlflow.service <<'UNIT'
+              [Unit]
+              Description=MLflow Server (Docker, SQLite)
+              After=docker.service
+              Requires=docker.service
 
-          [Service]
-          Restart=always
-          EnvironmentFile=/etc/mlflow/env
-          ExecStartPre=/usr/bin/docker pull ${DockerImage}
-          ExecStart=/usr/bin/docker run --rm --name mlflow \
-            -p 5000:5000 \
-            -v /var/lib/mlflow/db:/mlflow_db \
-            -v /var/lib/mlflow/auth:/mlflow_auth \
-            -e BACKEND_STORE_URI=sqlite:////mlflow_db/mlflow.db?check_same_thread=false \
-            -e DEFAULT_ARTIFACT_ROOT=s3://${ArtifactBucket}/mlruns \
-            -e MLFLOW_FLASK_SERVER_SECRET_KEY \
-            -e MLFLOW_AUTH_CONFIG_PATH \
-            ${DockerImage} --app-name basic-auth
-          ExecStop=/usr/bin/docker stop mlflow
+              [Service]
+              Restart=always
+              EnvironmentFile=/etc/mlflow/env
+              ExecStartPre=/usr/bin/docker pull ${DockerImage}
+              ExecStart=/usr/bin/docker run --rm --name mlflow \
+                -p 5000:5000 \
+                -v /var/lib/mlflow/db:/mlflow_db \
+                -v /var/lib/mlflow/auth:/mlflow_auth \
+                -e BACKEND_STORE_URI=sqlite:////mlflow_db/mlflow.db?check_same_thread=false \
+                -e DEFAULT_ARTIFACT_ROOT=s3://${ArtifactBucket}/mlruns \
+                -e MLFLOW_FLASK_SERVER_SECRET_KEY \
+                -e MLFLOW_AUTH_CONFIG_PATH \
+                ${DockerImage} --app-name basic-auth
+              ExecStop=/usr/bin/docker stop mlflow
 
-          [Install]
-          WantedBy=multi-user.target
-          UNIT
+              [Install]
+              WantedBy=multi-user.target
+              UNIT
 
-          systemctl daemon-reload
-          systemctl enable --now mlflow
+              systemctl daemon-reload
+              systemctl enable --now mlflow
+            - { ArtifactBucket: !Ref ArtifactBucket, DockerImage: !Ref DockerImage }
 
       Tags:
         - { Key: Name, Value: !Sub "mlflow-ec2-${Env}" }

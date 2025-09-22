@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: MLflow on EC2 with SQLite backend and S3 artifact store, Nginx, basic auth, and SSM.
+Description: MLflow on EC2 with SQLite backend and S3 artifact store, Nginx reverse proxy, basic auth, and SSM.
 
 Parameters:
   Env:
@@ -18,10 +18,10 @@ Parameters:
     Description: MLflow server image (GHCR path)
   VpcId:
     Type: AWS::EC2::VPC::Id
-    Description: VPC for the EC2 instance and security group (use your default VPC)
+    Description: VPC for the EC2 instance / security group
   SubnetId:
     Type: AWS::EC2::Subnet::Id
-    Description: Subnet in that VPC (use a default subnet)
+    Description: Subnet in that VPC
   UbuntuAmiId:
     Type: String
     Description: Ubuntu 22.04 AMI ID (resolved by CI/script)
@@ -67,6 +67,8 @@ Resources:
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 22,  ToPort: 22,  CidrIp: !Ref SSHCidr }
         - { IpProtocol: tcp, FromPort: 80,  ToPort: 80,  CidrIp: 0.0.0.0/0 }
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
 
   InstanceRole:
     Type: AWS::IAM::Role
@@ -104,98 +106,101 @@ Resources:
     Properties:
       ImageId: !Ref UbuntuAmiId
       InstanceType: t3.small
-      SubnetId: !Ref SubnetId
       KeyName: !Ref KeyPairName
       IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref SubnetId
       SecurityGroupIds: [ !Ref EC2SG ]
       UserData:
-        Fn::Base64:
-          !Sub
-            - |
-              #!/bin/bash
-              set -eux
-              export DEBIAN_FRONTEND=noninteractive
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
 
-              apt-get update
-              apt-get install -y docker.io nginx sqlite3 snapd
-              # Enable SSM agent for no-SSH troubleshooting / commands
-              snap install amazon-ssm-agent --classic
-              systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || systemctl enable --now amazon-ssm-agent || true
+          # Base packages
+          apt-get update
+          apt-get install -y docker.io nginx sqlite3 snapd
+          systemctl enable --now docker
 
-              systemctl enable --now docker
+          # SSM agent (for remote diagnostics)
+          snap install amazon-ssm-agent --classic || true
+          systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || systemctl enable --now amazon-ssm-agent || true
 
-              # Nginx reverse proxy to MLflow on :5000
-              cat >/etc/nginx/sites-available/default <<'NG'
-              server {
-                listen 80 default_server;
-                listen [::]:80 default_server;
-                server_name _;
-                location / {
-                  proxy_pass http://127.0.0.1:5000;
-                  proxy_set_header Host $host;
-                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto http;
-                  proxy_read_timeout 600;
-                }
-              }
-              NG
-              systemctl restart nginx
+          # Nginx reverse proxy to MLflow on :5000
+          cat >/etc/nginx/sites-available/default <<'NG'
+          server {
+            listen 80 default_server;
+            listen [::]:80 default_server;
+            server_name _;
+            location / {
+              proxy_pass http://127.0.0.1:5000;
+              proxy_set_header Host $host;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto http;
+              proxy_read_timeout 600;
+            }
+          }
+          NG
+          nginx -t
+          systemctl restart nginx
 
-              # SQLite DB (tracking) + WAL + host perms for container UID 1000
-              mkdir -p /var/lib/mlflow/db
-              sqlite3 /var/lib/mlflow/db/mlflow.db "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
-              chown -R 1000:1000 /var/lib/mlflow/db
+          # SQLite DB (tracking) + WAL + host perms for container UID 1000
+          mkdir -p /var/lib/mlflow/db
+          sqlite3 /var/lib/mlflow/db/mlflow.db "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
+          chown -R 1000:1000 /var/lib/mlflow/db
 
-              # Auth config + secret (persisted on host; mounted into container)
-              mkdir -p /var/lib/mlflow/auth
-              cat >/var/lib/mlflow/auth/basic_auth.ini <<'INI'
-              [mlflow]
-              database_uri = sqlite:////mlflow_auth/basic_auth.db
-              default_permission = READ
-              admin_username = admin
-              admin_password = password1234
-              INI
-              chmod 0644 /var/lib/mlflow/auth/basic_auth.ini
-              chown -R 1000:1000 /var/lib/mlflow/auth
+          # Auth config (persisted on host; mounted into container)
+          mkdir -p /var/lib/mlflow/auth
+          cat >/var/lib/mlflow/auth/basic_auth.ini <<'INI'
+          [mlflow]
+          database_uri = sqlite:////mlflow_auth/basic_auth.db
+          default_permission = READ
+          admin_username = admin
+          admin_password = password1234
+          authorization_function = mlflow.server.auth:authenticate_request_basic_auth
+          INI
+          chmod 0644 /var/lib/mlflow/auth/basic_auth.ini
+          chown -R 1000:1000 /var/lib/mlflow/auth
 
-              install -d -m 0755 /etc/mlflow
-              SECRET=$(head -c 32 /dev/urandom | base64)
-              cat >/etc/mlflow/env <<EOF
-              BACKEND_STORE_URI=sqlite:////mlflow_db/mlflow.db?check_same_thread=false
-              DEFAULT_ARTIFACT_ROOT=s3://${ArtifactBucket}/mlruns
-              MLFLOW_FLASK_SERVER_SECRET_KEY=$SECRET
-              MLFLOW_AUTH_CONFIG_PATH=/mlflow_auth/basic_auth.ini
-              EOF
-              chmod 0644 /etc/mlflow/env
-              chown -R 1000:1000 /var/lib/mlflow/auth
+          # Container env-file (quoted lines avoided; values written verbatim)
+          install -d -m 0755 /etc/mlflow
+          SECRET=$(head -c 32 /dev/urandom | base64)
+          cat >/etc/mlflow/env <<EOF
+          BACKEND_STORE_URI=sqlite:////mlflow_db/mlflow.db?check_same_thread=false
+          DEFAULT_ARTIFACT_ROOT=s3://${ArtifactBucket}/mlruns
+          MLFLOW_FLASK_SERVER_SECRET_KEY=$SECRET
+          MLFLOW_AUTH_CONFIG_PATH=/mlflow_auth/basic_auth.ini
+          EOF
+          chmod 0644 /etc/mlflow/env
 
-              # systemd unit for MLflow
-              cat >/etc/systemd/system/mlflow.service <<'UNIT'
-              [Unit]
-              Description=MLflow Server (Docker, SQLite)
-              After=network-online.target docker.service
-              Wants=network-online.target
-              Requires=docker.service
+          # systemd unit for MLflow (uses env-file; mounts DB & auth dirs)
+          cat >/etc/systemd/system/mlflow.service <<'UNIT'
+          [Unit]
+          Description=MLflow Server (Docker, SQLite)
+          After=network-online.target docker.service
+          Wants=network-online.target
+          Requires=docker.service
 
-              [Service]
-              Restart=always
-              RestartSec=5
-              EnvironmentFile=/etc/mlflow/env
-              ExecStartPre=/usr/bin/docker pull ${DockerImage}
-              ExecStart=/usr/bin/docker run --rm --name mlflow \
-                -p 5000:5000 \
-                -v /var/lib/mlflow/db:/mlflow_db \
-                -v /var/lib/mlflow/auth:/mlflow_auth \
-                ${DockerImage}
-              ExecStop=/usr/bin/docker stop mlflow
+          [Service]
+          Restart=always
+          RestartSec=5
+          EnvironmentFile=/etc/mlflow/env
+          ExecStartPre=/usr/bin/docker pull ${DockerImage}
+          ExecStart=/usr/bin/docker run --rm --name mlflow \
+            --env-file /etc/mlflow/env \
+            -e MLFLOW_AUTH_CONFIG_PATH=/mlflow_auth/basic_auth.ini \
+            -p 5000:5000 \
+            -v /var/lib/mlflow/db:/mlflow_db \
+            -v /var/lib/mlflow/auth:/mlflow_auth \
+            ${DockerImage}
+          ExecStop=/usr/bin/docker stop mlflow
 
-              [Install]
-              WantedBy=multi-user.target
-              UNIT
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
 
-              systemctl daemon-reload
-              systemctl enable --now mlflow
-            - { ArtifactBucket: !Ref ArtifactBucket, DockerImage: !Ref DockerImage }
+          systemctl daemon-reload
+          systemctl enable --now mlflow
+
       Tags:
         - { Key: Name, Value: !Sub "mlflow-ec2-${Env}" }
 

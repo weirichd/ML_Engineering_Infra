@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Minimal MLflow on EC2 with SQLite backend and S3 artifact store (HTTP only)
+Description: MLflow on EC2 with SQLite backend and S3 artifact store, Nginx, basic auth, and SSM.
 
 Parameters:
   Env:
@@ -11,22 +11,20 @@ Parameters:
   SSHCidr:
     Type: String
     Default: 0.0.0.0/0
-    Description: CIDR allowed to SSH to EC2 (use your.ip.addr/32)
+    Description: CIDR allowed to SSH to EC2 (e.g., your.ip.addr/32)
   DockerImage:
     Type: String
     Default: ghcr.io/OWNER/mlflow-server:latest
-    Description: MLflow server image (we’ll swap OWNER later)
+    Description: MLflow server image (GHCR path)
   VpcId:
     Type: AWS::EC2::VPC::Id
     Description: VPC for the EC2 instance and security group (use your default VPC)
   SubnetId:
     Type: AWS::EC2::Subnet::Id
-    Description: Subnet in that VPC (use one of the default subnets)
+    Description: Subnet in that VPC (use a default subnet)
   UbuntuAmiId:
     Type: String
-    Description: "AMI ID for Ubuntu 22.04"
-
-Mappings: {}
+    Description: Ubuntu 22.04 AMI ID (resolved by CI/script)
 
 Resources:
   ArtifactBucket:
@@ -42,6 +40,7 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+
   ArtifactBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -116,11 +115,16 @@ Resources:
               #!/bin/bash
               set -eux
               export DEBIAN_FRONTEND=noninteractive
+
               apt-get update
-              apt-get install -y docker.io nginx sqlite3
+              apt-get install -y docker.io nginx sqlite3 snapd
+              # Enable SSM agent for no-SSH troubleshooting / commands
+              snap install amazon-ssm-agent --classic
+              systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || systemctl enable --now amazon-ssm-agent || true
+
               systemctl enable --now docker
 
-              # Nginx proxy
+              # Nginx reverse proxy to MLflow on :5000
               cat >/etc/nginx/sites-available/default <<'NG'
               server {
                 listen 80 default_server;
@@ -137,17 +141,18 @@ Resources:
               NG
               systemctl restart nginx
 
-              # SQLite + WAL + ownership for container UID 1000
+              # SQLite DB (tracking) + WAL + host perms for container UID 1000
               mkdir -p /var/lib/mlflow/db
               sqlite3 /var/lib/mlflow/db/mlflow.db "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
               chown -R 1000:1000 /var/lib/mlflow/db
 
-              # ---- Auth config & secret (persist on host)
+              # Auth config + secret (persisted on host; mounted into container)
               mkdir -p /var/lib/mlflow/auth
               cat >/var/lib/mlflow/auth/basic_auth.ini <<'INI'
               [mlflow]
               database_uri = sqlite:////mlflow_auth/basic_auth.db
               INI
+
               install -d -m 0755 /etc/mlflow
               SECRET=$(head -c 32 /dev/urandom | base64)
               cat >/etc/mlflow/env <<EOF
@@ -156,15 +161,17 @@ Resources:
               EOF
               chown -R 1000:1000 /var/lib/mlflow/auth
 
-              # systemd unit
+              # systemd unit for MLflow
               cat >/etc/systemd/system/mlflow.service <<'UNIT'
               [Unit]
               Description=MLflow Server (Docker, SQLite)
-              After=docker.service
+              After=network-online.target docker.service
+              Wants=network-online.target
               Requires=docker.service
 
               [Service]
               Restart=always
+              RestartSec=5
               EnvironmentFile=/etc/mlflow/env
               ExecStartPre=/usr/bin/docker pull ${DockerImage}
               ExecStart=/usr/bin/docker run --rm --name mlflow \
@@ -185,12 +192,14 @@ Resources:
               systemctl daemon-reload
               systemctl enable --now mlflow
             - { ArtifactBucket: !Ref ArtifactBucket, DockerImage: !Ref DockerImage }
-
       Tags:
         - { Key: Name, Value: !Sub "mlflow-ec2-${Env}" }
 
 Outputs:
-  ArtifactBucketName: { Value: !Ref ArtifactBucket }
-  EC2PublicIP:        { Value: !GetAtt EC2Instance.PublicIp }
-  MLflowURL:          { Value: !Sub "http://${EC2Instance.PublicIp}" }
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket
+  EC2PublicIP:
+    Value: !GetAtt EC2Instance.PublicIp
+  MLflowURL:
+    Value: !Sub "http://${EC2Instance.PublicIp}"
 

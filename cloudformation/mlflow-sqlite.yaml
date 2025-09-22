@@ -151,15 +151,22 @@ Resources:
               cat >/var/lib/mlflow/auth/basic_auth.ini <<'INI'
               [mlflow]
               database_uri = sqlite:////mlflow_auth/basic_auth.db
-              default_permissions = READ
+              default_permission = READ
+              admin_username = admin
+              admin_password = password1234
               INI
+              chmod 0644 /var/lib/mlflow/auth/basic_auth.ini
+              chown -R 1000:1000 /var/lib/mlflow/auth
 
               install -d -m 0755 /etc/mlflow
               SECRET=$(head -c 32 /dev/urandom | base64)
               cat >/etc/mlflow/env <<EOF
+              BACKEND_STORE_URI=sqlite:////mlflow_db/mlflow.db?check_same_thread=false
+              DEFAULT_ARTIFACT_ROOT=s3://${ArtifactBucket}/mlruns
               MLFLOW_FLASK_SERVER_SECRET_KEY=$SECRET
-              MLFLOW_AUTH_CONFIG_PATH=/mlflow_auth/basic_auth.ini
+              MLFLOW_AUTH_CONFIG_PATH=/mlflow_auth/basic_auth.iniV
               EOF
+              chmod 0644 /etc/mlflow/env
               chown -R 1000:1000 /var/lib/mlflow/auth
 
               # systemd unit for MLflow
@@ -179,10 +186,6 @@ Resources:
                 -p 5000:5000 \
                 -v /var/lib/mlflow/db:/mlflow_db \
                 -v /var/lib/mlflow/auth:/mlflow_auth \
-                -e BACKEND_STORE_URI=sqlite:////mlflow_db/mlflow.db?check_same_thread=false \
-                -e DEFAULT_ARTIFACT_ROOT=s3://${ArtifactBucket}/mlruns \
-                -e MLFLOW_FLASK_SERVER_SECRET_KEY \
-                -e MLFLOW_AUTH_CONFIG_PATH \
                 ${DockerImage}
               ExecStop=/usr/bin/docker stop mlflow
 

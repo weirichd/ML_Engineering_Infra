@@ -140,6 +140,23 @@ Resources:
           sqlite3 /var/lib/mlflow/db/mlflow.db "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
           chown -R 1000:1000 /var/lib/mlflow/db
 
+          # ---- Auth config & secret (persist across container restarts)
+          mkdir -p /var/lib/mlflow/auth
+          cat >/var/lib/mlflow/auth/basic_auth.ini <<'INI'
+          [mlflow]
+          # store users/permissions here on the host
+          database_uri = sqlite:////mlflow_auth/basic_auth.db
+          # default_permission = READ
+          INI
+
+          # server secret for CSRF (kept on host, injected into container)
+          install -d -m 0755 /etc/mlflow
+          SECRET=$(head -c 32 /dev/urandom | base64)
+          cat >/etc/mlflow/env <<EOF
+          MLFLOW_FLASK_SERVER_SECRET_KEY=${SECRET}
+          MLFLOW_AUTH_CONFIG_PATH=/mlflow_auth/basic_auth.ini
+          EOF
+          #
           # systemd unit to run MLflow container (single worker)
           cat >/etc/systemd/system/mlflow.service <<'UNIT'
           [Unit]
@@ -149,13 +166,17 @@ Resources:
 
           [Service]
           Restart=always
+          EnvironmentFile=/etc/mlflow/env
           ExecStartPre=/usr/bin/docker pull ${DockerImage}
           ExecStart=/usr/bin/docker run --rm --name mlflow \
             -p 5000:5000 \
             -v /var/lib/mlflow/db:/mlflow_db \
+            -v /var/lib/mlflow/auth:/mlflow_auth \
             -e BACKEND_STORE_URI=sqlite:////mlflow_db/mlflow.db?check_same_thread=false \
             -e DEFAULT_ARTIFACT_ROOT=s3://${ArtifactBucket}/mlruns \
-            ${DockerImage}
+            -e MLFLOW_FLASK_SERVER_SECRET_KEY \
+            -e MLFLOW_AUTH_CONFIG_PATH \
+            ${DockerImage} --app-name basic-auth
           ExecStop=/usr/bin/docker stop mlflow
 
           [Install]

@@ -1,0 +1,175 @@
+name: Build then Deploy MLflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: AWS region to deploy
+        default: us-east-2
+        required: true
+      recreate:
+        description: Delete stack first (forces new instance to run updated UserData)
+        type: boolean
+        default: false
+  push:
+    branches: [ main ]
+    paths:
+      - docker/**
+      - cloudformation/**
+      - scripts/**
+      - .github/workflows/release.yml
+
+concurrency:
+  group: mlflow-release
+  cancel-in-progress: true
+
+jobs:
+  build_image:
+    name: Build & Push GHCR image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_ref: ${{ steps.meta.outputs.image_ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image tag (use repo var or fall back to owner path)
+        id: resolve
+        run: |
+          if [ -n "${{ vars.DOCKER_IMAGE }}" ]; then
+            echo "IMAGE_TAG=${{ vars.DOCKER_IMAGE }}" >> $GITHUB_ENV
+          else
+            echo "IMAGE_TAG=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/mlflow-server:latest" >> $GITHUB_ENV
+          fi
+          echo "Using IMAGE_TAG=$IMAGE_TAG"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          file: docker/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_TAG }}
+
+      - name: Compose digest-pinned image ref
+        id: meta
+        run: |
+          REF="${IMAGE_TAG%:*}@${{ steps.build.outputs.digest }}"
+          echo "image_ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Pinned image ref: $REF"
+
+  deploy_infra:
+    name: Deploy CloudFormation (uses deploy.sh)
+    needs: build_image
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.region || 'us-east-2' }}
+
+      - name: Make deploy script executable
+        run: chmod +x scripts/deploy.sh
+
+      - name: Deploy (optionally recreate)
+        env:
+          REGION: ${{ inputs.region || 'us-east-2' }}
+          KEYPAIR: ${{ secrets.EC2_KEYPAIR_NAME }}
+          CIDR: ${{ secrets.SSH_CIDR }}
+          IMAGE: ${{ needs.build_image.outputs.image_ref || vars.DOCKER_IMAGE }}
+          RECREATE: ${{ inputs.recreate }}
+        run: |
+          set -euo pipefail
+          echo "Region=$REGION  KeyPair=$KEYPAIR  CIDR=$CIDR"
+          if [ -z "${IMAGE}" ]; then
+            echo "IMAGE is empty; set repo variable DOCKER_IMAGE or rely on build output." >&2
+            exit 1
+          fi
+          if [ "${RECREATE}" = "true" ]; then
+            RECREATE_FLAG="--recreate"
+          else
+            RECREATE_FLAG=""
+          fi
+
+          scripts/deploy.sh \
+            --region "$REGION" \
+            --keypair "$KEYPAIR" \
+            --cidr "$CIDR" \
+            --image "$IMAGE" \
+            $RECREATE_FLAG
+
+      - name: Show stack events (debug)
+        if: always()
+        run: |
+          set +e
+          aws cloudformation describe-stacks --stack-name mlflow-sqlite \
+            --query 'Stacks[0].[StackStatus, StackStatusReason]' --output table || true
+          echo
+          echo "Last 20 events:"
+          aws cloudformation describe-stack-events --stack-name mlflow-sqlite \
+            --query 'reverse(take(reverse(StackEvents), `20`))[
+              ].[
+                Timestamp,
+                ResourceStatus,
+                ResourceType,
+                LogicalResourceId,
+                ResourceStatusReason
+              ]' \
+            --output table || true
+
+      # Optional but very handy: collect server logs via SSM after deploy
+      - name: Collect server logs via SSM (post-deploy)
+        if: always()
+        run: |
+          set -euo pipefail
+
+          IID=$(aws ec2 describe-instances \
+            --filters "Name=tag:aws:cloudformation:stack-name,Values=mlflow-sqlite" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null || echo "NONE")
+
+          echo "InstanceId=$IID"
+          if [ "$IID" = "NONE" ] || [ "$IID" = "None" ]; then
+            echo "No running instance found; skipping SSM log collection."
+            exit 0
+          fi
+
+          CMD_ID=$(aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --instance-ids "$IID" \
+            --parameters commands="$(
+              cat <<'EOS'
+              set -eux
+              systemctl status mlflow --no-pager --lines=30 || true
+              journalctl -u mlflow -n 120 --no-pager || true
+              docker ps -a || true
+              cat /etc/mlflow/env || true
+              ls -ld /var/lib/mlflow/db /var/lib/mlflow/auth || true
+              ls -l /var/lib/mlflow/auth || true
+              tail -n 80 /var/log/nginx/error.log || true
+              curl -sI http://127.0.0.1:5000 | head -n1 || true
+              EOS
+            )" \
+            --query 'Command.CommandId' --output text)
+
+          aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "$IID"
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$IID" \
+            --query '[Status,StandardOutputContent,StandardErrorContent]' --output text
+

@@ -164,7 +164,7 @@ Resources:
               BACKEND_STORE_URI=sqlite:////mlflow_db/mlflow.db?check_same_thread=false
               DEFAULT_ARTIFACT_ROOT=s3://${ArtifactBucket}/mlruns
               MLFLOW_FLASK_SERVER_SECRET_KEY=$SECRET
-              MLFLOW_AUTH_CONFIG_PATH=/mlflow_auth/basic_auth.iniV
+              MLFLOW_AUTH_CONFIG_PATH=/mlflow_auth/basic_auth.ini
               EOF
               chmod 0644 /etc/mlflow/env
               chown -R 1000:1000 /var/lib/mlflow/auth

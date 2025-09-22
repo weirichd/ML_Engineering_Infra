@@ -9,5 +9,7 @@
 !_TAG_PROGRAM_NAME	Universal Ctags	/Derived from Exuberant Ctags/
 !_TAG_PROGRAM_URL	https://ctags.io/	/official site/
 !_TAG_PROGRAM_VERSION	5.9.0	//
+EOF	scripts/deploy.sh	/^  cat <<EOF$/;"	h
 Getting Started	README.md	/^## Getting Started$/;"	s	chapter:ML Engineering Infra
 ML Engineering Infra	README.md	/^# ML Engineering Infra$/;"	c
+usage	scripts/deploy.sh	/^usage() {$/;"	f

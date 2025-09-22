@@ -175,7 +175,7 @@ Resources:
                 -e DEFAULT_ARTIFACT_ROOT=s3://${ArtifactBucket}/mlruns \
                 -e MLFLOW_FLASK_SERVER_SECRET_KEY \
                 -e MLFLOW_AUTH_CONFIG_PATH \
-                ${DockerImage} --app-name basic-auth
+                ${DockerImage}
               ExecStop=/usr/bin/docker stop mlflow
 
               [Install]

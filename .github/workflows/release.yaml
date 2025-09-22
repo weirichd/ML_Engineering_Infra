@@ -135,7 +135,6 @@ jobs:
               ]' \
             --output table || true
 
-      # Optional but very handy: collect server logs via SSM after deploy
       - name: Collect server logs via SSM (post-deploy)
         if: always()
         run: |
@@ -151,25 +150,24 @@ jobs:
             exit 0
           fi
 
+          # Build commands JSON safely (no here-docs)
+          CMDS_JSON=$(jq -nc --arg a "set -eux" \
+            --arg b "systemctl status mlflow --no-pager --lines=30 || true" \
+            --arg c "journalctl -u mlflow -n 120 --no-pager || true" \
+            --arg d "docker ps -a || true" \
+            --arg e "cat /etc/mlflow/env || true" \
+            --arg f "ls -ld /var/lib/mlflow/db /var/lib/mlflow/auth || true" \
+            --arg g "ls -l /var/lib/mlflow/auth || true" \
+            --arg h "tail -n 80 /var/log/nginx/error.log || true" \
+            --arg i "curl -sI http://127.0.0.1:5000 | head -n1 || true" \
+            '{commands: [$a,$b,$c,$d,$e,$f,$g,$h,$i]}')
+
           CMD_ID=$(aws ssm send-command \
             --document-name "AWS-RunShellScript" \
             --instance-ids "$IID" \
-            --parameters commands="$(
-              cat <<'EOS'
-              set -eux
-              systemctl status mlflow --no-pager --lines=30 || true
-              journalctl -u mlflow -n 120 --no-pager || true
-              docker ps -a || true
-              cat /etc/mlflow/env || true
-              ls -ld /var/lib/mlflow/db /var/lib/mlflow/auth || true
-              ls -l /var/lib/mlflow/auth || true
-              tail -n 80 /var/log/nginx/error.log || true
-              curl -sI http://127.0.0.1:5000 | head -n1 || true
-              EOS
-            )" \
+            --parameters "$CMDS_JSON" \
             --query 'Command.CommandId' --output text)
 
           aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "$IID"
           aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$IID" \
             --query '[Status,StandardOutputContent,StandardErrorContent]' --output text
-

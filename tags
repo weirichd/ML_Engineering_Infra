@@ -66,9 +66,11 @@ Managing Users	README.md	/^## Managing Users$/;"	s	chapter:MLflow on AWS EC2 (wi
 Prerequisites	README.md	/^## Prerequisites$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
 Testing	README.md	/^## Testing$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
 args	mlflow_test/basic_test.py	/^    args = parser.parse_args()$/;"	v
-c_err	scripts/deploy.sh	/^c_err()  { printf "\\033[31m%s\\033[0m\\n" "$*" >&2; }$/;"	f
-c_info	scripts/deploy.sh	/^c_info() { printf "\\033[36m%s\\033[0m\\n" "$*"; }$/;"	f
-c_ok	scripts/deploy.sh	/^c_ok()   { printf "\\033[32m%s\\033[0m\\n" "$*"; }$/;"	f
+err	bin/deploy.sh	/^err() { printf "\\033[31m%s\\033[0m\\n" "$*" >&2; }$/;"	f
+info	bin/deploy.sh	/^info(){ printf "\\033[36m%s\\033[0m\\n" "$*"; }$/;"	f
 main	mlflow_test/basic_test.py	/^def main(ip: str) -> None:$/;"	f	typeref:typename:None
 np	mlflow_test/basic_test.py	/^import numpy as np$/;"	I	nameref:module:numpy
+ok	bin/deploy.sh	/^ok()  { printf "\\033[32m%s\\033[0m\\n" "$*"; }$/;"	f
 parser	mlflow_test/basic_test.py	/^    parser = argparse.ArgumentParser(description="MLflow smoke test")$/;"	v
+stack_failed_events	bin/deploy.sh	/^stack_failed_events() {$/;"	f
+stack_outputs	bin/deploy.sh	/^stack_outputs() {$/;"	f

@@ -11,6 +11,24 @@ Parameters:
     Default: PAY_PER_REQUEST
     AllowedValues: [PAY_PER_REQUEST]
     Description: On-demand is cheapest & simplest for class use
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 KeyPair for SSH
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  AllowedCidr:
+    Type: String
+    Default: 0.0.0.0/0
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium, t3.large]
+  ImageId:
+    Type: String
+    Description: AMI for the training instance
+    Default: ""
 
 Resources:
   MlflowArtifactsBucket:
@@ -60,6 +78,91 @@ Resources:
       SSESpecification:
         SSEEnabled: true
 
+  TrainingSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSH access for training instance
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedCidr
+
+  TrainingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TrainingLeastPriv
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # S3: MLflow artifacts + Feast registry
+              - Sid: S3Access
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${MlflowArtifactsBucket}"
+                  - !Sub "arn:aws:s3:::${MlflowArtifactsBucket}/*"
+                  - !Sub "arn:aws:s3:::${FeastRegistryBucket}"
+                  - !Sub "arn:aws:s3:::${FeastRegistryBucket}/*"
+              # DynamoDB: Feast online table
+              - Sid: DdbAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:Query
+                Resource: !GetAtt FeastOnlineTable.Arn
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  TrainingInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [ !Ref TrainingRole ]
+
+  TrainingInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref TrainingInstanceProfile
+      KeyName: !Ref KeyName
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [ !Ref TrainingSecurityGroup ]
+      Tags:
+        - { Key: Name, Value: !Sub "training-${StackSuffix}" }
+      UserData:
+        Fn::Base64: !Sub |
+            #cloud-config
+            runcmd:
+            - dnf -y update
+            - dnf -y install python3.12 python3.12-pip gcc python3.12-devel
+            - pip3.12 install --upgrade pip
+            - pip3.12 install scikit-learn==1.5.2
+            # Prepare class starter location
+            - mkdir -p /opt/classstarter && chmod 755 /opt/classstarter
+            # SSH hardening: only 'students' group can SSH
+            - printf "PasswordAuthentication no\nChallengeResponseAuthentication no\nPubkeyAuthentication yes\nPermitRootLogin no\nAllowGroups students\n" > /etc/ssh/sshd_config.d/01-class.conf
+            - groupadd -f students
+            - systemctl restart sshd
+            # Friendly MOTD
+            - printf "\nWelcome to the COMP 376 training instance.\nPython: $(python3.12 --version)\nYour workspace: ~/class\n" > /etc/motd
+
 Outputs:
   MlflowArtifactsBucketName:
     Value: !Ref MlflowArtifactsBucket
@@ -73,3 +176,7 @@ Outputs:
     Value: !Ref FeastOnlineTable
     Export:
       Name: !Sub "${AWS::StackName}-FeastOnlineTableName"
+  TrainingInstanceId:
+    Value: !Ref TrainingInstance
+  TrainingPublicDnsName:
+    Value: !GetAtt TrainingInstance.PublicDnsName

@@ -59,12 +59,16 @@
 5. Set user permissions	README.md	/^### 5. Set user permissions$/;"	S	section:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)""Managing Users
 6. List users	README.md	/^### 6. List users$/;"	S	section:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)""Managing Users
 Cleanup	README.md	/^## Cleanup$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
+Comp 376 Course Kit	kit/README.md	/^# Comp 376 Course Kit$/;"	c
+Contents	kit/README.md	/^## Contents$/;"	s	chapter:Comp 376 Course Kit
 Deployment	README.md	/^## Deployment$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
 End Result	README.md	/^## End Result$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
 MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)	README.md	/^# MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)$/;"	c
 Managing Users	README.md	/^## Managing Users$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
 Prerequisites	README.md	/^## Prerequisites$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
+TXT	kit/bootstrap_feast_user.sh	/^cat > "${REPO_DIR}\/README.txt" <<TXT$/;"	h
 Testing	README.md	/^## Testing$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
+YAML	kit/bootstrap_feast_user.sh	/^cat > "${REPO_DIR}\/feature_store.yaml" <<YAML$/;"	h
 args	mlflow_test/basic_test.py	/^    args = parser.parse_args()$/;"	v
 err	bin/deploy.sh	/^err() { printf "\\033[31m%s\\033[0m\\n" "$*" >&2; }$/;"	f
 info	bin/deploy.sh	/^info(){ printf "\\033[36m%s\\033[0m\\n" "$*"; }$/;"	f

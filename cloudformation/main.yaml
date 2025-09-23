@@ -1,76 +1,102 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Comp 376 AWS Stack
+Description: >
+  ML Engineering Course infra: S3 (MLflow artifacts + Feast registry), DynamoDB (Feast online),
+  RDS Postgres (offline), and a Training EC2 that fetches a GitHub-hosted course kit at boot.
 
 Parameters:
   StackSuffix:
     Type: String
-    Default: comp376
-    Description: Suffix to keep names unique (e.g., semester code)
-  DynamoTableMode:
-    Type: String
-    Default: PAY_PER_REQUEST
-    AllowedValues: [PAY_PER_REQUEST]
-    Description: On-demand is cheapest & simplest for class use
+    Default: ml-engineering
+    Description: Suffix used to make names deterministic and unique per environment (e.g., 'ml-engineering')
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
-    Description: EC2 KeyPair for SSH
+    Description: EC2 KeyPair name for SSH (in your region)
   VpcId:
     Type: AWS::EC2::VPC::Id
+    Description: VPC for the Training instance and RDS
   SubnetId:
     Type: AWS::EC2::Subnet::Id
+    Description: Subnet (public) for the Training instance
   AllowedCidr:
     Type: String
     Default: 0.0.0.0/0
+    Description: CIDR allowed to SSH to the Training instance (port 22)
   InstanceType:
     Type: String
     Default: t3.small
-    AllowedValues: [t3.micro, t3.small, t3.medium, t3.large]
+    AllowedValues: [t3.nano, t3.micro, t3.small, t3.medium, t3.large, t3.xlarge, t3a.micro, t3a.small, t3a.medium, t3a.large]
   ImageId:
-    Type: String
-    Description: AMI for the training instance
-    Default: ""
+    Type: AWS::EC2::Image::Id
+    Description: AMI for the Training instance (script auto-resolves AL2023 if not set)
+  # Feast + MLflow storage
+  # (Bucket names must be globally unique; these use AccountId + StackSuffix.)
+  # RDS parameters (password is passed by deploy script from SSM)
   DBUsername:
     Type: String
     Default: feastuser
   DBPassword:
     Type: String
     NoEcho: true
-    Description: Master password (deploy script will read from SSM and pass it)
+    Description: Master password (fetched from SSM by deploy script)
   DBName:
     Type: String
     Default: feastdb
   DBInstanceClass:
     Type: String
     Default: db.t4g.micro
-    AllowedValues:
-      - db.t4g.micro
-      - db.t4g.small
-      - db.t3.micro
-      - db.t3.small
+    AllowedValues: [db.t4g.micro, db.t4g.small, db.t3.micro, db.t3.small]
   DBAllocatedStorage:
     Type: Number
     Default: 20
   DBSubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
-    Description: At least two subnets (different AZs) in the default VPC
+    Description: At least two subnets (prefer different AZs) for the DB subnet group
   AllowDbPublicCidr:
     Type: String
     Default: ""
-    Description: Optional CIDR to allow 5432 from the internet (e.g., your IP). Leave blank to disable.
+    Description: Optional CIDR to allow 5432 to RDS from the internet (e.g., 1.2.3.4/32). Leave blank to disable.
+  # Course kit (GitHub codeload) + provisioning
+  KitRepo:
+    Type: String
+    Default: weirichd/ML_Engineering_Infra
+    Description: GitHub repo (owner/name) hosting the kit/ directory
+  KitRef:
+    Type: String
+    Default: main
+    Description: Git ref (branch, tag, or commit) to fetch for the kit
+  StudentsRosterKey:
+    Type: String
+    Default: rosters/students.csv
+    Description: S3 key (in the Feast registry bucket) for the roster CSV
+  TrainingInstanceNonce:
+    Type: String
+    Default: ""
+    Description: Change this to force TrainingInstance replacement (re-run cloud-init)
 
 Conditions:
   UseDbPublicCidr: !Not [ !Equals [ !Ref AllowDbPublicCidr, "" ] ]
 
 Resources:
+  # ---------- S3 ----------
+  FeastRegistryBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub feast-registry-${StackSuffix}-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireRegistry
+            Status: Enabled
+            ExpirationInDays: 30
+
   MlflowArtifactsBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "mlflow-artifacts-${StackSuffix}-${AWS::AccountId}"
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
+      BucketName: !Sub mlflow-artifacts-${StackSuffix}-${AWS::AccountId}
       VersioningConfiguration:
         Status: Enabled
       LifecycleConfiguration:
@@ -79,36 +105,28 @@ Resources:
             Status: Enabled
             NoncurrentVersionExpiration:
               NoncurrentDays: 30
-
-  FeastRegistryBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub "feast-registry-${StackSuffix}-${AWS::AccountId}"
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
-        BlockPublicPolicy: true
         IgnorePublicAcls: true
+        BlockPublicPolicy: true
         RestrictPublicBuckets: true
-      LifecycleConfiguration:
-        Rules:
-          - Id: ExpireRegistry
-            Status: Enabled
-            ExpirationInDays: 30
 
+  # ---------- DynamoDB (Feast online store) ----------
   FeastOnlineTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub "feast-online-${StackSuffix}"
-      BillingMode: !Ref DynamoTableMode
+      TableName: !Sub feast-online-${StackSuffix}
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: entityKey
           AttributeType: S
       KeySchema:
         - AttributeName: entityKey
           KeyType: HASH
-      SSESpecification:
-        SSEEnabled: true
 
+  # ---------- Security Groups ----------
   TrainingSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -119,80 +137,6 @@ Resources:
           FromPort: 22
           ToPort: 22
           CidrIp: !Ref AllowedCidr
-
-  TrainingRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: { Service: ec2.amazonaws.com }
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: TrainingLeastPriv
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              # S3: MLflow artifacts + Feast registry
-              - Sid: S3Access
-                Effect: Allow
-                Action:
-                  - s3:ListBucket
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:DeleteObject
-                Resource:
-                  - !Sub "arn:aws:s3:::${MlflowArtifactsBucket}"
-                  - !Sub "arn:aws:s3:::${MlflowArtifactsBucket}/*"
-                  - !Sub "arn:aws:s3:::${FeastRegistryBucket}"
-                  - !Sub "arn:aws:s3:::${FeastRegistryBucket}/*"
-              # DynamoDB: Feast online table
-              - Sid: DdbAccess
-                Effect: Allow
-                Action:
-                  - dynamodb:BatchWriteItem
-                  - dynamodb:PutItem
-                  - dynamodb:UpdateItem
-                  - dynamodb:GetItem
-                  - dynamodb:BatchGetItem
-                  - dynamodb:Query
-                Resource: !GetAtt FeastOnlineTable.Arn
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-
-  TrainingInstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      Roles: [ !Ref TrainingRole ]
-
-  TrainingInstance:
-    Type: AWS::EC2::Instance
-    Properties:
-      ImageId: !Ref ImageId
-      InstanceType: !Ref InstanceType
-      IamInstanceProfile: !Ref TrainingInstanceProfile
-      KeyName: !Ref KeyName
-      SubnetId: !Ref SubnetId
-      SecurityGroupIds: [ !Ref TrainingSecurityGroup ]
-      Tags:
-        - { Key: Name, Value: !Sub "training-${StackSuffix}" }
-      UserData:
-        Fn::Base64: !Sub |
-            #cloud-config
-            runcmd:
-            - dnf -y update
-            - dnf -y install python3.12 python3.12-pip gcc python3.12-devel
-            - pip3.12 install --upgrade pip
-            - pip3.12 install scikit-learn==1.5.2
-            # Prepare class starter location
-            - mkdir -p /opt/classstarter && chmod 755 /opt/classstarter
-            # SSH hardening: only 'students' group can SSH
-            - printf "PasswordAuthentication no\nChallengeResponseAuthentication no\nPubkeyAuthentication yes\nPermitRootLogin no\nAllowGroups students\n" > /etc/ssh/sshd_config.d/01-class.conf
-            - groupadd -f students
-            - systemctl restart sshd
-            # Friendly MOTD
-            - printf "\nWelcome to the COMP 376 training instance.\nPython: $(python3.12 --version)\nYour workspace: ~/class\n" > /etc/motd
 
   RDSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -219,10 +163,64 @@ Resources:
       ToPort: 5432
       CidrIp: !Ref AllowDbPublicCidr
 
+  # ---------- IAM for Training EC2 ----------
+  TrainingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-TrainingRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: TrainingLeastPriv
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # S3 access: Feast registry + MLflow artifacts
+              - Sid: S3Access
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${FeastRegistryBucket}
+                  - !Sub arn:aws:s3:::${MlflowArtifactsBucket}
+              - Sid: S3ObjectRW
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub arn:aws:s3:::${FeastRegistryBucket}/*
+                  - !Sub arn:aws:s3:::${MlflowArtifactsBucket}/*
+              # DynamoDB access: Feast online table
+              - Sid: DdbAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:Query
+                Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FeastOnlineTable}
+
+  TrainingInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${AWS::StackName}-TrainingInstanceProfile
+      Roles: [ !Ref TrainingRole ]
+
+  # ---------- RDS ----------
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
-      DBSubnetGroupDescription: Default VPC public subnets for RDS
+      DBSubnetGroupDescription: Default VPC subnets for RDS
       SubnetIds: !Ref DBSubnetIds
 
   RDSInstance:
@@ -243,24 +241,86 @@ Resources:
       DeletionProtection: false
       AutoMinorVersionUpgrade: true
 
+  # ---------- Training EC2 ----------
+  TrainingInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [ !Ref TrainingSecurityGroup ]
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref TrainingInstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub training-${StackSuffix}
+      UserData:
+        Fn::Base64:
+          !Sub
+            - |
+              #cloud-config
+              runcmd:
+                # Force replacement when nonce changes
+                - bash -lc 'mkdir -p /etc/class && echo "${TrainingInstanceNonce}" > /etc/class/nonce'
+
+                # Minimal tools to fetch kit
+                - dnf -y update
+                - dnf -y install curl tar
+
+                # Class config (db + stack)
+                - bash -lc 'cat >/etc/class/db.env << "ENV"
+                  DB_HOST=${DbEndpoint}
+                  DB_NAME=${DBName}
+                  DB_USER=${DBUsername}
+                  DB_PASS=${DBPassword}
+                  ENV'
+                - bash -lc 'cat >/etc/class/stack.env << "ENV"
+                  FEAST_REGISTRY_BUCKET=${FeastRegistryBucketName}
+                  FEAST_ONLINE_TABLE=${FeastOnlineTableName}
+                  AWS_REGION=${AWS::Region}
+                  ENV'
+                - chgrp students /etc/class/db.env /etc/class/stack.env || true
+                - chmod 640 /etc/class/db.env /etc/class/stack.env || true
+                - groupadd -f students
+
+                # SSH hardening — only 'students' group may SSH
+                - bash -lc 'printf "PasswordAuthentication no\nChallengeResponseAuthentication no\nPubkeyAuthentication yes\nPermitRootLogin no\nAllowGroups students\n" > /etc/ssh/sshd_config.d/01-class.conf'
+                - systemctl restart sshd
+
+                # Fetch the course kit tarball from GitHub and install
+                - KIT_URL="https://codeload.github.com/${KitRepo}/tar.gz/${KitRef}"
+                - mkdir -p /opt/course-kit
+                - curl -fsSL "$KIT_URL" -o /root/course-kit.tar.gz
+                - tar -xzf /root/course-kit.tar.gz -C /opt/course-kit --strip-components=1
+                - install -m 755 /opt/course-kit/kit/*.sh /usr/local/bin/
+                - /usr/local/bin/install-host.sh
+
+                # Best-effort student provisioning from S3 roster (skip if not present yet)
+                - aws s3 cp "s3://${FeastRegistryBucketName}/${StudentsRosterKey}" /root/students.csv || true
+                - /usr/local/bin/add_students.sh /root/students.csv || true
+
+                # Friendly MOTD
+                - bash -lc 'printf "\nWelcome to the ML Engineering training instance.\nYour workspace: ~/class\nUse: sudo -u <student> /usr/local/bin/bootstrap_feast_user.sh\n" > /etc/motd'
+            - {
+                DbEndpoint: !GetAtt RDSInstance.Endpoint.Address,
+                FeastRegistryBucketName: !Ref FeastRegistryBucket,
+                FeastOnlineTableName: !Ref FeastOnlineTable,
+                KitRepo: !Ref KitRepo,
+                KitRef: !Ref KitRef,
+                TrainingInstanceNonce: !Ref TrainingInstanceNonce
+              }
 
 Outputs:
-  MlflowArtifactsBucketName:
-    Value: !Ref MlflowArtifactsBucket
-    Export:
-      Name: !Sub "${AWS::StackName}-MlflowArtifactsBucketName"
   FeastRegistryBucketName:
     Value: !Ref FeastRegistryBucket
-    Export:
-      Name: !Sub "${AWS::StackName}-FeastRegistryBucketName"
+  MlflowArtifactsBucketName:
+    Value: !Ref MlflowArtifactsBucket
   FeastOnlineTableName:
     Value: !Ref FeastOnlineTable
-    Export:
-      Name: !Sub "${AWS::StackName}-FeastOnlineTableName"
+  RDSEndpoint:
+    Value: !GetAtt RDSInstance.Endpoint.Address
   TrainingInstanceId:
     Value: !Ref TrainingInstance
   TrainingPublicDnsName:
     Value: !GetAtt TrainingInstance.PublicDnsName
-  RDSEndpoint:
-    Value: !GetAtt RDSInstance.Endpoint.Address
 

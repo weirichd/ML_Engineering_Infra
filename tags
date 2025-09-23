@@ -70,6 +70,7 @@ TXT	kit/bootstrap_feast_user.sh	/^cat > "${REPO_DIR}\/README.txt" <<TXT$/;"	h
 Testing	README.md	/^## Testing$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
 YAML	kit/bootstrap_feast_user.sh	/^cat > "${REPO_DIR}\/feature_store.yaml" <<YAML$/;"	h
 args	mlflow_test/basic_test.py	/^    args = parser.parse_args()$/;"	v
+deploy_stack	bin/deploy.sh	/^deploy_stack() {$/;"	f
 err	bin/deploy.sh	/^err() { printf "\\033[31m%s\\033[0m\\n" "$*" >&2; }$/;"	f
 info	bin/deploy.sh	/^info(){ printf "\\033[36m%s\\033[0m\\n" "$*"; }$/;"	f
 main	mlflow_test/basic_test.py	/^def main(ip: str) -> None:$/;"	f	typeref:typename:None

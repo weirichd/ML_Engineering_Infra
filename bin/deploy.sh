@@ -2,11 +2,12 @@
 # Minimal deploy script (old-style) for the ML Eng Course stack.
 #
 # Usage:
-#   scripts/deploy.sh deploy     # create/update the stack
-#   scripts/deploy.sh outputs    # print outputs
-#   scripts/deploy.sh events     # recent failed events (debug)
-#   scripts/deploy.sh delete     # delete the stack (waits)
-#   scripts/deploy.sh watch      # stream live CloudFormation events
+#   scripts/deploy.sh deploy       # create/update the stack
+#   scripts/deploy.sh recreate     # force-replace the TrainingInstance (new UserData/kit)
+#   scripts/deploy.sh outputs      # print outputs
+#   scripts/deploy.sh events       # recent failed events (debug)
+#   scripts/deploy.sh delete       # delete the stack (waits)
+#   scripts/deploy.sh watch        # stream live CloudFormation events
 #
 # Reads config from .env in repo root.
 
@@ -43,7 +44,14 @@ DB_USERNAME="${DB_USERNAME:-feastuser}"
 DB_NAME="${DB_NAME:-feastdb}"
 DB_INSTANCE_CLASS="${DB_INSTANCE_CLASS:-db.t4g.micro}"
 DB_STORAGE_GB="${DB_STORAGE_GB:-20}"
-ALLOW_DB_CIDR="${ALLOW_DB_CIDR:-}"        # optional public CIDR for 5432; empty disables
+ALLOW_DB_CIDR="${ALLOW_DB_CIDR:-}"        # optional public CIDR for 5432; leave blank to disable
+
+# Optional / Kit source (GitHub)
+KIT_REPO="${KIT_REPO:-}"                  # e.g. weirichd/ML_Engineering_Infra
+KIT_REF="${KIT_REF:-}"                    # e.g. kit-v1 (tag), main, or a commit
+
+# Nonce (used by 'recreate' action to force instance replacement)
+TRAINING_INSTANCE_NONCE="${TRAINING_INSTANCE_NONCE:-}"
 
 AWS_PROFILE="${AWS_PROFILE:-}"
 AWS_ARGS=(--region "$REGION")
@@ -116,7 +124,7 @@ PARAMS=( "StackSuffix=$SUFFIX" )
 # If the template includes TrainingInstance/RDS, we expect EC2/RDS params.
 # We'll auto-resolve VPC/SUBNET/AMI/DB subnets if not provided, but only proceed if KEY_NAME is set.
 if [[ -n "${KEY_NAME}" ]]; then
-  # Resolve default VPC + a default subnet (like your original script)
+  # Resolve default VPC + a default subnet
   if [[ -z "${VPC_ID}" || "${VPC_ID}" == "None" ]]; then
     VPC_ID="$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text "${AWS_ARGS[@]}")"
   fi
@@ -155,7 +163,6 @@ if [[ -n "${KEY_NAME}" ]]; then
           | [-1].ImageId" \
         --output text "${AWS_ARGS[@]}" 2>/dev/null
     )"
-    # Fallback: any AL2023 x86_64 (still excluding ecs/gpu/minimal), newest first
     if [[ -z "$IMAGE_ID" || "$IMAGE_ID" == "None" ]]; then
       IMAGE_ID="$(
         aws ec2 describe-images \
@@ -197,7 +204,6 @@ if [[ -n "${KEY_NAME}" ]]; then
   DB_SUBNETS_STR="$(aws ec2 describe-subnets \
     --filters Name=vpc-id,Values=${VPC_ID} Name=default-for-az,Values=true \
     --query 'Subnets[].SubnetId' --output text "${AWS_ARGS[@]}" | tr '\t' ' ')"
-  # load into bash array
   read -r -a DB_SUBNETS <<<"$DB_SUBNETS_STR"
   if [[ ${#DB_SUBNETS[@]} -lt 2 ]]; then
     DB_SUBNETS_STR="$(aws ec2 describe-subnets \
@@ -205,7 +211,6 @@ if [[ -n "${KEY_NAME}" ]]; then
       --query 'Subnets[].SubnetId' --output text "${AWS_ARGS[@]}" | tr '\t' ' ')"
     read -r -a DB_SUBNETS <<<"$DB_SUBNETS_STR"
   fi
-  # de-duplicate while preserving order
   uniq_subnets=()
   declare -A seen=()
   for id in "${DB_SUBNETS[@]}"; do
@@ -235,34 +240,54 @@ if [[ -n "${KEY_NAME}" ]]; then
     "DBInstanceClass=$DB_INSTANCE_CLASS"
     "DBAllocatedStorage=$DB_STORAGE_GB"
     "DBSubnetIds=$DB_SUBNET_IDS"
-    "AllowDbPublicCidr=$ALLOW_DB_CIDR"
   )
+  # ONLY pass AllowDbPublicCidr if non-empty to avoid CFN 'null' error
+  if [[ -n "$ALLOW_DB_CIDR" ]]; then
+    PARAMS+=("AllowDbPublicCidr=$ALLOW_DB_CIDR")
+  fi
+
+  # Pass GitHub kit source if provided
+  [[ -n "$KIT_REPO" ]] && PARAMS+=("KitRepo=$KIT_REPO")
+  [[ -n "$KIT_REF"  ]] && PARAMS+=("KitRef=$KIT_REF")
+
+  # Nonce: include if present (deploy) or if 'recreate' action sets it below
+  [[ -n "$TRAINING_INSTANCE_NONCE" ]] && PARAMS+=("TrainingInstanceNonce=$TRAINING_INSTANCE_NONCE")
 fi
+
+deploy_stack() {
+  info "Deploying stack: $STACK_NAME"
+  set +e
+  OUT=$(aws cloudformation deploy \
+    --stack-name "$STACK_NAME" \
+    --template-file "$TEMPLATE" \
+    --parameter-overrides "${PARAMS[@]}" \
+    --capabilities CAPABILITY_NAMED_IAM \
+    "${AWS_ARGS[@]}" 2>&1)
+  STATUS=$?
+  set -e
+  if [[ $STATUS -ne 0 ]]; then
+    err "Deployment failed."
+    echo "---- aws cli output ----"
+    echo "$OUT"
+    echo "------------------------"
+    info "Recent failure events:"
+    stack_failed_events
+    exit $STATUS
+  fi
+  ok "Deployment succeeded."
+  info "Stack outputs:"
+  stack_outputs
+}
 
 case "$ACTION" in
   deploy)
-    info "Deploying stack: $STACK_NAME"
-    set +e
-    OUT=$(aws cloudformation deploy \
-      --stack-name "$STACK_NAME" \
-      --template-file "$TEMPLATE" \
-      --parameter-overrides "${PARAMS[@]}" \
-      --capabilities CAPABILITY_NAMED_IAM \
-      "${AWS_ARGS[@]}" 2>&1)
-    STATUS=$?
-    set -e
-    if [[ $STATUS -ne 0 ]]; then
-      err "Deployment failed."
-      echo "---- aws cli output ----"
-      echo "$OUT"
-      echo "------------------------"
-      info "Recent failure events:"
-      stack_failed_events
-      exit $STATUS
-    fi
-    ok "Deployment succeeded."
-    info "Stack outputs:"
-    stack_outputs
+    deploy_stack
+    ;;
+  recreate)
+    TRAINING_INSTANCE_NONCE="$(date +%s)"
+    info "Forcing TrainingInstance replacement with nonce: $TRAINING_INSTANCE_NONCE"
+    PARAMS+=("TrainingInstanceNonce=$TRAINING_INSTANCE_NONCE")
+    deploy_stack
     ;;
   outputs)
     stack_outputs
@@ -282,7 +307,7 @@ case "$ACTION" in
     ;;
   *)
     err "Unknown action: $ACTION"
-    echo "Usage: $0 {deploy|outputs|events|delete|watch}"
+    echo "Usage: $0 {deploy|recreate|outputs|events|delete|watch}"
     exit 1
     ;;
 esac

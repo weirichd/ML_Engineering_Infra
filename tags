@@ -50,11 +50,25 @@
 !_TAG_ROLE_DESCRIPTION!Python!unknown	indirectlyImported	/classes\/variables\/functions\/modules imported in alternative name/
 !_TAG_ROLE_DESCRIPTION!Sh!heredoc	endmarker	/end marker/
 !_TAG_ROLE_DESCRIPTION!Sh!script	loaded	/loaded/
-EOF	scripts/deploy.sh	/^  cat <<EOF$/;"	h
-Getting Started	README.md	/^## Getting Started$/;"	s	chapter:ML Engineering Infra
-ML Engineering Infra	README.md	/^# ML Engineering Infra$/;"	c
+1. Push to `main` branch	README.md	/^### 1. Push to `main` branch$/;"	S	section:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)""Deployment
+1. SSH into the EC2 instance	README.md	/^### 1. SSH into the EC2 instance$/;"	S	section:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)""Managing Users
+2. Access the MLflow server	README.md	/^### 2. Access the MLflow server$/;"	S	section:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)""Deployment
+2. Open a shell inside the container	README.md	/^### 2. Open a shell inside the container$/;"	S	section:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)""Managing Users
+3. Create the database if not already present	README.md	/^### 3. Create the database if not already present$/;"	S	section:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)""Managing Users
+4. Add a new user	README.md	/^### 4. Add a new user$/;"	S	section:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)""Managing Users
+5. Set user permissions	README.md	/^### 5. Set user permissions$/;"	S	section:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)""Managing Users
+6. List users	README.md	/^### 6. List users$/;"	S	section:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)""Managing Users
+Cleanup	README.md	/^## Cleanup$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
+Deployment	README.md	/^## Deployment$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
+End Result	README.md	/^## End Result$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
+MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)	README.md	/^# MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)$/;"	c
+Managing Users	README.md	/^## Managing Users$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
+Prerequisites	README.md	/^## Prerequisites$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
+Testing	README.md	/^## Testing$/;"	s	chapter:MLflow on AWS EC2 (with SQLite + S3 + Nginx + Basic Auth)
 args	mlflow_test/basic_test.py	/^    args = parser.parse_args()$/;"	v
+c_err	scripts/deploy.sh	/^c_err()  { printf "\\033[31m%s\\033[0m\\n" "$*" >&2; }$/;"	f
+c_info	scripts/deploy.sh	/^c_info() { printf "\\033[36m%s\\033[0m\\n" "$*"; }$/;"	f
+c_ok	scripts/deploy.sh	/^c_ok()   { printf "\\033[32m%s\\033[0m\\n" "$*"; }$/;"	f
 main	mlflow_test/basic_test.py	/^def main(ip: str) -> None:$/;"	f	typeref:typename:None
 np	mlflow_test/basic_test.py	/^import numpy as np$/;"	I	nameref:module:numpy
 parser	mlflow_test/basic_test.py	/^    parser = argparse.ArgumentParser(description="MLflow smoke test")$/;"	v
-usage	scripts/deploy.sh	/^usage() {$/;"	f

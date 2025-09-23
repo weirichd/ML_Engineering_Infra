@@ -1,114 +1,67 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Defaults (override via flags or env)
-REGION="${AWS_REGION:-us-east-2}"
-STACK="${STACK_NAME:-mlflow-sqlite}"
-TEMPLATE="${TEMPLATE_FILE:-cloudformation/mlflow-sqlite.yaml}"
-KEYPAIR="${EC2_KEYPAIR_NAME:-}"
-CIDR="${SSH_CIDR:-auto}"
-IMAGE="${DOCKER_IMAGE:-ghcr.io/weirichd/mlflow-server:latest}"
-RECREATE="false"
+# --- helper: colored output ---
+c_ok()   { printf "\033[32m%s\033[0m\n" "$*"; }
+c_err()  { printf "\033[31m%s\033[0m\n" "$*" >&2; }
+c_info() { printf "\033[36m%s\033[0m\n" "$*"; }
 
-usage() {
-  cat <<EOF
-Usage: $0 [--region us-east-2] [--stack mlflow-sqlite] [--template path.yaml] \\
-          --keypair <ec2-keypair-name> --cidr <x.x.x.x/32> [--image <ghcr image>] [--recreate]
-Env vars also supported: AWS_REGION, EC2_KEYPAIR_NAME, SSH_CIDR, DOCKER_IMAGE, STACK_NAME, TEMPLATE_FILE
-EOF
-}
+# --- load .env ---
+ENV_FILE="${ENV_FILE:-.env}"
+if [[ ! -f "$ENV_FILE" ]]; then
+  c_err "Missing $ENV_FILE. Copy .env.example to .env and fill in values."
+  exit 1
+fi
+# shellcheck disable=SC2046
+export $(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" | xargs)
 
-# Parse flags
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --region)   REGION="$2"; shift 2 ;;
-    --stack)    STACK="$2"; shift 2 ;;
-    --template) TEMPLATE="$2"; shift 2 ;;
-    --keypair)  KEYPAIR="$2"; shift 2 ;;
-    --cidr)     CIDR="$2"; shift 2 ;;
-    --image)    IMAGE="$2"; shift 2 ;;
-    --recreate) RECREATE="true"; shift 1 ;;
-    -h|--help)  usage; exit 0 ;;
-    *) echo "Unknown arg: $1"; usage; exit 2 ;;
-  esac
-done
+# --- required vars ---
+: "${STACK_NAME:?Set STACK_NAME in .env}"
+: "${REGION:?Set REGION in .env}"
+: "${SUFFIX:?Set SUFFIX in .env}"
+: "${TEMPLATE:?Set TEMPLATE in .env}"
 
-[[ -n "$KEYPAIR" ]] || { echo "Missing --keypair or EC2_KEYPAIR_NAME"; exit 1; }
-
-export AWS_DEFAULT_REGION="$REGION"
-export AWS_REGION="$REGION"
-
-echo "Region: $REGION"
-echo "Stack : $STACK"
-echo "Image : $IMAGE"
-echo "Tpl   : $TEMPLATE"
-
-# Optionally recreate the stack (useful after user-data changes)
-if [[ "$RECREATE" == "true" ]]; then
-  if aws cloudformation describe-stacks --stack-name "$STACK" >/dev/null 2>&1; then
-    echo "Deleting stack $STACK ..."
-    aws cloudformation delete-stack --stack-name "$STACK"
-    aws cloudformation wait stack-delete-complete --stack-name "$STACK"
-    echo "Deleted."
-  fi
+AWS_ARGS=(--region "$REGION")
+if [[ -n "${AWS_PROFILE:-}" ]]; then
+  AWS_ARGS+=(--profile "$AWS_PROFILE")
 fi
 
-# Resolve CIDR if 'auto'
-if [[ "$CIDR" == "auto" || -z "$CIDR" ]]; then
-  # Try a couple of services; fall back to DNS
-  PUBIP=$(curl -fsS https://checkip.amazonaws.com \
-        || curl -fsS https://api.ipify.org \
-        || dig +short myip.opendns.com @resolver1.opendns.com \
-        || true)
-  PUBIP=$(echo "$PUBIP" | tr -d '[:space:]')
-  if [[ "$PUBIP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    CIDR="${PUBIP}/32"
-    echo "Auto-detected SSH_CIDR=${CIDR}"
-  else
-    echo "Could not auto-detect a public IPv4 address. Please pass --cidr x.x.x.x/32" >&2
-    exit 1
-  fi
-fi
+# --- preflight checks ---
+command -v aws >/dev/null 2>&1 || { c_err "aws CLI not found. Install & configure it."; exit 2; }
+[[ -f "$TEMPLATE" ]] || { c_err "Template not found: $TEMPLATE"; exit 2; }
 
-
-# Discover default VPC + a default subnet
-VPC_ID=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
-SUBNET_ID=$(aws ec2 describe-subnets \
-  --filters Name=vpc-id,Values=${VPC_ID} Name=default-for-az,Values=true \
-  --query 'Subnets[0].SubnetId' --output text)
-if [[ -z "$SUBNET_ID" || "$SUBNET_ID" == "None" ]]; then
-  SUBNET_ID=$(aws ec2 describe-subnets --filters Name=vpc-id,Values=${VPC_ID} --query 'Subnets[0].SubnetId' --output text)
-fi
-[[ -n "$VPC_ID"     && "$VPC_ID"     != "None" ]] || { echo "Could not resolve default VPC"; exit 1; }
-[[ -n "$SUBNET_ID"  && "$SUBNET_ID"  != "None" ]] || { echo "Could not resolve default Subnet"; exit 1; }
-
-# Resolve latest Ubuntu 22.04 (Jammy) x86_64 AMI from Canonical
-UBUNTU_AMI=$(aws ec2 describe-images --owners 099720109477 \
-  --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
-            "Name=state,Values=available" \
-            "Name=virtualization-type,Values=hvm" \
-            "Name=architecture,Values=x86_64" \
-  --query 'reverse(sort_by(Images, &CreationDate))[0].ImageId' --output text)
-[[ -n "$UBUNTU_AMI" && "$UBUNTU_AMI" != "None" ]] || { echo "Failed to resolve Ubuntu AMI"; exit 1; }
-
-echo "VPC_ID=$VPC_ID"
-echo "SUBNET_ID=$SUBNET_ID"
-echo "UBUNTU_AMI=$UBUNTU_AMI"
-
-# Deploy (or update) the stack
-aws cloudformation deploy \
+c_info "Deploying stack: $STACK_NAME (region: $REGION, suffix: $SUFFIX)"
+set +e
+DEPLOY_OUT=$(aws cloudformation deploy \
+  --stack-name "$STACK_NAME" \
   --template-file "$TEMPLATE" \
-  --stack-name "$STACK" \
+  --parameter-overrides StackSuffix="$SUFFIX" \
   --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides \
-    Env=prod \
-    KeyPairName="$KEYPAIR" \
-    SSHCidr="$CIDR" \
-    DockerImage="$IMAGE" \
-    VpcId="$VPC_ID" \
-    SubnetId="$SUBNET_ID" \
-    UbuntuAmiId="$UBUNTU_AMI"
+  "${AWS_ARGS[@]}" 2>&1)
+STATUS=$?
+set -e
 
-# Show outputs
-aws cloudformation describe-stacks --stack-name "$STACK" --query "Stacks[0].Outputs" --output table
+if [[ $STATUS -ne 0 ]]; then
+  c_err "Deployment failed."
+  echo "---- aws cli output ----"
+  echo "$DEPLOY_OUT"
+  echo "------------------------"
+  c_info "Fetching recent stack events for clues…"
+  # If stack exists, print last few failure events
+  set +e
+  aws cloudformation describe-stack-events \
+    --stack-name "$STACK_NAME" "${AWS_ARGS[@]}" \
+    --query "StackEvents[?ResourceStatus=='CREATE_FAILED'||ResourceStatus=='UPDATE_FAILED'].[Timestamp,LogicalResourceId,ResourceStatus,ResourceStatusReason]" \
+    --output table 2>/dev/null || true
+  set -e
+  exit $STATUS
+fi
+
+# --- success: show outputs ---
+c_ok "Deployment succeeded."
+c_info "Stack outputs:"
+aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" "${AWS_ARGS[@]}" \
+  --query "Stacks[0].Outputs[].[OutputKey,OutputValue]" \
+  --output table
 

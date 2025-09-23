@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Comp 376 AWS Stack
+
+Parameters:
+  StackSuffix:
+    Type: String
+    Default: comp376
+    Description: Suffix to keep names unique (e.g., semester code)
+  DynamoTableMode:
+    Type: String
+    Default: PAY_PER_REQUEST
+    AllowedValues: [PAY_PER_REQUEST]
+    Description: On-demand is cheapest & simplest for class use
+
+Resources:
+  MlflowArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "mlflow-artifacts-${StackSuffix}-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: AutoExpireOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+
+  FeastRegistryBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "feast-registry-${StackSuffix}-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireRegistry
+            Status: Enabled
+            ExpirationInDays: 30
+
+  FeastOnlineTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "feast-online-${StackSuffix}"
+      BillingMode: !Ref DynamoTableMode
+      AttributeDefinitions:
+        - AttributeName: entityKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: entityKey
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+
+Outputs:
+  MlflowArtifactsBucketName:
+    Value: !Ref MlflowArtifactsBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-MlflowArtifactsBucketName"
+  FeastRegistryBucketName:
+    Value: !Ref FeastRegistryBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-FeastRegistryBucketName"
+  FeastOnlineTableName:
+    Value: !Ref FeastOnlineTable
+    Export:
+      Name: !Sub "${AWS::StackName}-FeastOnlineTableName"

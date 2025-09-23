@@ -29,6 +29,37 @@ Parameters:
     Type: String
     Description: AMI for the training instance
     Default: ""
+  DBUsername:
+    Type: String
+    Default: feastuser
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: Master password (deploy script will read from SSM and pass it)
+  DBName:
+    Type: String
+    Default: feastdb
+  DBInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+    AllowedValues:
+      - db.t4g.micro
+      - db.t4g.small
+      - db.t3.micro
+      - db.t3.small
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+  DBSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least two subnets (different AZs) in the default VPC
+  AllowDbPublicCidr:
+    Type: String
+    Default: ""
+    Description: Optional CIDR to allow 5432 from the internet (e.g., your IP). Leave blank to disable.
+
+Conditions:
+  UseDbPublicCidr: !Not [ !Equals [ !Ref AllowDbPublicCidr, "" ] ]
 
 Resources:
   MlflowArtifactsBucket:
@@ -163,6 +194,56 @@ Resources:
             # Friendly MOTD
             - printf "\nWelcome to the COMP 376 training instance.\nPython: $(python3.12 --version)\nYour workspace: ~/class\n" > /etc/motd
 
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG for RDS Postgres
+      VpcId: !Ref VpcId
+
+  RDSIngressFromTraining:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RDSSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref TrainingSecurityGroup
+
+  RDSIngressFromCidr:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: UseDbPublicCidr
+    Properties:
+      GroupId: !Ref RDSSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      CidrIp: !Ref AllowDbPublicCidr
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Default VPC public subnets for RDS
+      SubnetIds: !Ref DBSubnetIds
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Ref DBName
+      Engine: postgres
+      EngineVersion: "16"
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      PubliclyAccessible: true
+      VPCSecurityGroups: [ !Ref RDSSecurityGroup ]
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      StorageType: gp3
+      BackupRetentionPeriod: 0
+      DeletionProtection: false
+      AutoMinorVersionUpgrade: true
+
+
 Outputs:
   MlflowArtifactsBucketName:
     Value: !Ref MlflowArtifactsBucket
@@ -180,3 +261,6 @@ Outputs:
     Value: !Ref TrainingInstance
   TrainingPublicDnsName:
     Value: !GetAtt TrainingInstance.PublicDnsName
+  RDSEndpoint:
+    Value: !GetAtt RDSInstance.Endpoint.Address
+

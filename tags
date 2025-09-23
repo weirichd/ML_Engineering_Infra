@@ -74,3 +74,5 @@ ok	bin/deploy.sh	/^ok()  { printf "\\033[32m%s\\033[0m\\n" "$*"; }$/;"	f
 parser	mlflow_test/basic_test.py	/^    parser = argparse.ArgumentParser(description="MLflow smoke test")$/;"	v
 stack_failed_events	bin/deploy.sh	/^stack_failed_events() {$/;"	f
 stack_outputs	bin/deploy.sh	/^stack_outputs() {$/;"	f
+stack_status	bin/deploy.sh	/^stack_status() {$/;"	f
+watch_events	bin/deploy.sh	/^watch_events() {$/;"	f
